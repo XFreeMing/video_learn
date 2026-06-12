@@ -1,0 +1,17 @@
+# pnpm 11+ 配置主场（package.json 的 "pnpm" 字段已不再被读取）
+
+# React 18/19 peer 冲突：不因 peer 版本不匹配而中断安装，并自动安装 peerDependencies
+strictPeerDependencies: false
+autoInstallPeers: true
+
+# 解决 @content-collections/mdx 对 react 的 peer 版本冲突：强制复用根 react 版本
+overrides:
+  '@content-collections/mdx>react': '$react'
+
+# 允许 esbuild 运行安装脚本（落地平台原生二进制，dev/build/test 均依赖）
+allowBuilds:
+  esbuild: true
+
+# 全局 minimumReleaseAge 策略的豁免项（由 pnpm 自动追加）
+minimumReleaseAgeExclude:
+  - ioredis@5.11.1
