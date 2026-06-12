@@ -3,7 +3,6 @@ import { z } from 'zod'
 
 export const env = createEnv({
   server: {
-    DATABASE_URL: z.string().min(1),
     REDIS_URL: z.string().url().optional(),
     WS_PORT: z.coerce.number().optional().default(3001),
     SERVER_URL: z.string().url().optional(),

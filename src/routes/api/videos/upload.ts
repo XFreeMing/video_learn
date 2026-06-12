@@ -2,10 +2,9 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { createFileRoute } from '@tanstack/react-router'
 import { v4 as uuidv4 } from 'uuid'
-import { db } from '#/db'
-import { uploads, videos } from '#/db/schema'
 import { env } from '#/env'
 import { ensureDir, isVideoFile } from '#/lib/video-storage'
+import { saveUpload, saveVideo } from '#/lib/video-store'
 import { enqueueJob } from '#/services/video-processor/queue'
 
 export const Route = createFileRoute('/api/videos/upload')({
@@ -58,25 +57,46 @@ export const Route = createFileRoute('/api/videos/upload')({
             return Response.json({ error: 'No video files found in zip' }, { status: 400 })
           }
 
-          // Create upload record
-          await db.insert(uploads).values({
+          // Save upload record
+          const now = new Date().toISOString()
+          await saveUpload({
             id: uploadId,
             originalFilename: zipFile.name,
             videoCount: videoFiles.length,
             status: 'processing',
+            createdAt: now,
+            updatedAt: now,
           })
 
-          // Create video records + queue jobs
+          // Copy video files to raw dir, save video records + queue jobs
           const createdVideos: Array<{ id: string; filename: string; status: string }> = []
+          const rawDir = path.join(env.VIDEO_STORAGE_PATH, uploadId, 'raw')
+          await ensureDir(rawDir)
+
           for (const entryPath of videoFiles) {
             const videoId = uuidv4()
             const fileName = path.basename(entryPath)
 
-            await db.insert(videos).values({
+            // Copy file from zip to raw dir
+            const destPath = path.join(rawDir, fileName)
+            const entry = directory.files.find((f) => f.path === entryPath)!
+            await new Promise<void>((resolve, reject) => {
+              const writeStream = require('node:fs').createWriteStream(destPath)
+              entry.stream().pipe(writeStream)
+              writeStream.on('finish', resolve)
+              writeStream.on('error', reject)
+            })
+
+            const videoNow = new Date().toISOString()
+            await saveVideo({
               id: videoId,
               uploadId,
               filename: fileName,
+              status: 'pending',
+              progress: 0,
               outputPath: `${env.VIDEO_STORAGE_PATH}/${videoId}`,
+              createdAt: videoNow,
+              updatedAt: videoNow,
             })
 
             await enqueueJob(videoId, uploadId)

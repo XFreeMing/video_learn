@@ -1,9 +1,6 @@
-import { eq } from 'drizzle-orm'
 import ffmpeg from 'fluent-ffmpeg'
-import { db } from '#/db'
-import { videos } from '#/db/schema'
-import { createEvent, publishEvent } from '#/event'
 import { ensureDir, getUploadRawDir, getVideoDir } from '#/lib/video-storage'
+import { getVideo, updateVideo } from '#/lib/video-store'
 import { dequeueJob, updateJobProgress } from './queue'
 import { assembleSegments } from './steps/assemble'
 import { deduplicateFrames } from './steps/deduplicate'
@@ -29,32 +26,17 @@ export async function processVideo(
 
     // Step 1: Extract frames + audio
     await updateJobProgress(videoId, 'extracting', 10, '提取帧和音频...')
-    await updateDbStatus(videoId, 'extracting', 10)
-    await publishEvent(
-      createEvent({ type: 'video.processing.started', payload: { videoId, step: 'extracting' } }),
-    )
-
+    await updateVideo(videoId, { status: 'extracting', progress: 10 })
     await Promise.all([extractFrames(videoPath, videoId), extractAudio(videoPath, videoId)])
 
     // Step 2: Transcribe audio
     await updateJobProgress(videoId, 'transcribing', 40, '语音转写中...')
-    await updateDbStatus(videoId, 'transcribing', 40)
-    await publishEvent(
-      createEvent({ type: 'video.processing.started', payload: { videoId, step: 'transcribing' } }),
-    )
-
+    await updateVideo(videoId, { status: 'transcribing', progress: 40 })
     const transcript = await transcribeAudio(videoId)
 
     // Step 3: Deduplicate frames
     await updateJobProgress(videoId, 'deduplicating', 70, '图片去重中...')
-    await updateDbStatus(videoId, 'deduplicating', 70)
-    await publishEvent(
-      createEvent({
-        type: 'video.processing.started',
-        payload: { videoId, step: 'deduplicating' },
-      }),
-    )
-
+    await updateVideo(videoId, { status: 'deduplicating', progress: 70 })
     const frames = await deduplicateFrames(videoId)
 
     // Step 4: Assemble segments
@@ -76,49 +58,23 @@ export async function processVideo(
       totalFramesAfterDedup: frames.length,
     }
 
-    const segments = await assembleSegments(videoId, transcript, frames, metadata)
+    await assembleSegments(videoId, transcript, frames, metadata)
 
     // Step 5: Complete
     await updateJobProgress(videoId, 'completed', 100, '处理完成')
-    await updateDbStatus(videoId, 'completed', 100)
-    await publishEvent(
-      createEvent({
-        type: 'video.processing.completed',
-        payload: {
-          videoId,
-          segmentCount: segments.segments.length,
-          frameCount: frames.length,
-        },
-      }),
-    )
+    await updateVideo(videoId, {
+      status: 'completed',
+      progress: 100,
+      duration: metadata.duration,
+      resolution: metadata.resolution,
+      metadata: metadata as Record<string, unknown>,
+      outputPath: getVideoDir(videoId),
+    })
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error)
     await updateJobProgress(videoId, 'failed', 0, '处理失败', errorMsg)
-    await updateDbStatus(videoId, 'failed', 0, errorMsg)
-    await publishEvent(
-      createEvent({
-        type: 'video.processing.failed',
-        payload: { videoId, error: errorMsg },
-      }),
-    )
+    await updateVideo(videoId, { status: 'failed', progress: 0, error: errorMsg })
   }
-}
-
-async function updateDbStatus(
-  videoId: string,
-  status: 'extracting' | 'transcribing' | 'deduplicating' | 'completed' | 'failed',
-  progress: number,
-  error?: string,
-) {
-  await db
-    .update(videos)
-    .set({
-      status,
-      progress,
-      error: error ?? null,
-      updatedAt: new Date(),
-    })
-    .where(eq(videos.id, videoId))
 }
 
 function probeVideo(videoPath: string): Promise<{
@@ -151,7 +107,7 @@ function probeVideo(videoPath: string): Promise<{
 }
 
 /**
- * Start the worker loop. Continuously polls Redis for jobs.
+ * Start the worker loop. Continuously polls for jobs.
  */
 export function startWorker(pollIntervalMs = 2000): void {
   console.log('[VideoWorker] Starting worker loop...')
@@ -161,11 +117,9 @@ export function startWorker(pollIntervalMs = 2000): void {
       const job = await dequeueJob()
       if (job) {
         console.log(`[VideoWorker] Processing job: ${job.videoId}`)
-        const video = await db.query.videos.findFirst({
-          where: eq(videos.id, job.videoId),
-        })
+        const video = await getVideo(job.videoId)
         if (!video) {
-          console.error(`[VideoWorker] Video ${job.videoId} not found in DB`)
+          console.error(`[VideoWorker] Video ${job.videoId} not found in store`)
           await updateJobProgress(job.videoId, 'failed', 0, '视频记录不存在')
         } else {
           const rawPath = `${getUploadRawDir(job.uploadId)}/${video.filename}`

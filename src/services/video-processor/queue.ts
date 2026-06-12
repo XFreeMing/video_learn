@@ -1,25 +1,33 @@
-import Redis from 'ioredis'
+import path from 'node:path'
+import { env } from '#/env'
+import { ensureDir, readJsonFile, writeJsonFile } from '#/lib/video-storage'
 import type { ProcessingJob, VideoStatus } from './types'
 
-const QUEUE_KEY = 'video:queue'
-const PROGRESS_PREFIX = 'video:progress:'
+const QUEUE_PATH = path.join(env.VIDEO_STORAGE_PATH, '.store', 'queue.json')
+const PROGRESS_DIR = path.join(env.VIDEO_STORAGE_PATH, '.store', 'progress')
 
-let redis: Redis | null = null
+// ── In-memory job queue (persisted to JSON on each mutation) ────────────
 
-function getRedis(): Redis {
-  if (!redis) {
-    const url = process.env.REDIS_URL
-    if (!url) {
-      // Fallback: use in-memory queue via simple array (for dev without Redis)
-      throw new Error('REDIS_URL is not set. Redis is required for the video processing queue.')
-    }
-    redis = new Redis(url)
+let jobQueue: ProcessingJob[] = []
+let initialized = false
+
+async function loadQueue(): Promise<void> {
+  try {
+    const data = await readJsonFile<ProcessingJob[]>(QUEUE_PATH)
+    jobQueue = data ?? []
+  } catch {
+    jobQueue = []
   }
-  return redis
+  initialized = true
+}
+
+async function persistQueue(): Promise<void> {
+  await ensureDir(path.dirname(QUEUE_PATH))
+  await writeJsonFile(QUEUE_PATH, jobQueue)
 }
 
 export async function enqueueJob(videoId: string, uploadId: string): Promise<void> {
-  const r = getRedis()
+  if (!initialized) await loadQueue()
   const job: ProcessingJob = {
     videoId,
     uploadId,
@@ -28,14 +36,22 @@ export async function enqueueJob(videoId: string, uploadId: string): Promise<voi
     currentStep: '等待中',
     updatedAt: Date.now(),
   }
-  await r.lpush(QUEUE_KEY, JSON.stringify(job))
+  jobQueue.push(job)
+  await persistQueue()
 }
 
 export async function dequeueJob(): Promise<ProcessingJob | null> {
-  const r = getRedis()
-  const result = await r.rpop(QUEUE_KEY)
-  if (!result) return null
-  return JSON.parse(result) as ProcessingJob
+  if (!initialized) await loadQueue()
+  if (jobQueue.length === 0) return null
+  const job = jobQueue.shift()!
+  await persistQueue()
+  return job
+}
+
+// ── File-based progress tracking ────────────────────────────────────────
+
+function getProgressPath(videoId: string): string {
+  return path.join(PROGRESS_DIR, `${videoId}.json`)
 }
 
 export async function updateJobProgress(
@@ -45,27 +61,27 @@ export async function updateJobProgress(
   currentStep: string,
   error?: string,
 ): Promise<void> {
-  const r = getRedis()
+  await ensureDir(PROGRESS_DIR)
   const job: ProcessingJob = {
     videoId,
-    uploadId: '', // not needed for progress lookup
+    uploadId: '',
     status,
     progress,
     currentStep,
     error,
     updatedAt: Date.now(),
   }
-  await r.hset(`${PROGRESS_PREFIX}${videoId}`, JSON.stringify(job))
+  await writeJsonFile(getProgressPath(videoId), job)
 }
 
 export async function getJobProgress(videoId: string): Promise<ProcessingJob | null> {
-  const r = getRedis()
-  const result = await r.hget(`${PROGRESS_PREFIX}${videoId}`, 'job')
-  if (!result) return null
-  return JSON.parse(result) as ProcessingJob
+  return readJsonFile<ProcessingJob>(getProgressPath(videoId))
 }
 
 export async function deleteJobProgress(videoId: string): Promise<void> {
-  const r = getRedis()
-  await r.del(`${PROGRESS_PREFIX}${videoId}`)
+  try {
+    await (await import('node:fs/promises')).unlink(getProgressPath(videoId))
+  } catch {
+    // File may not exist
+  }
 }

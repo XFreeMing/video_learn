@@ -33,6 +33,9 @@ let cached: Dependencies | null = null
 /** Build (and memoize) the production dependency bundle. */
 export function createProductionDeps(): Dependencies {
   if (cached) return cached
+  if (!db) {
+    throw new Error('DATABASE_URL is not set. Required for task/messaging system.')
+  }
   cached = {
     clock: systemClock,
     logger: consoleLogger,
@@ -53,6 +56,9 @@ export function createProductionDeps(): Dependencies {
  * Call once at server startup. Returns a stop function for graceful shutdown.
  */
 export function startEventWorkers(): () => void {
+  if (!db) {
+    throw new Error('DATABASE_URL is not set. Required for event workers.')
+  }
   const logger = consoleLogger
 
   const projection = makeIdempotent(

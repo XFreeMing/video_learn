@@ -14,6 +14,17 @@ const config = defineConfig({
     tailwindcss(),
     tanstackStart(),
     viteReact(),
+    // Start video processing worker during dev
+    {
+      name: 'video-worker',
+      configureServer(server) {
+        server.httpServer?.once('listening', async () => {
+          const { startWorker } = await import('./src/services/video-processor/worker.ts')
+          startWorker(2000)
+          console.log('[VideoWorker] Started in dev mode')
+        })
+      },
+    },
   ],
 })
 

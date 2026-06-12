@@ -36,6 +36,10 @@ export function getVideoPhashIndexPath(videoId: string): string {
   return path.join(STORAGE_BASE, videoId, 'phash-index.json')
 }
 
+export function getVideoProgressPath(videoId: string): string {
+  return path.join(STORAGE_BASE, '.store', 'progress', `${videoId}.json`)
+}
+
 export async function ensureDir(dirPath: string): Promise<void> {
   await fs.mkdir(dirPath, { recursive: true })
 }
